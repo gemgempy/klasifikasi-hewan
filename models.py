@@ -6,7 +6,7 @@ import numpy as np
 import joblib
 import tensorflow as tf
 
-from tensorflow.keras.applications import ResNet50, ResNet50V2, EfficientNetB0
+from tensorflow.keras.applications import ResNet50, EfficientNetB0, MobileNetV3Large
 from tensorflow.keras.layers import GlobalAveragePooling2D, Dense
 from tensorflow.keras.models import Model
 
@@ -33,8 +33,8 @@ def build_feature_extractor(name: str) -> tf.keras.Model:
             include_top=False,
             input_shape=IMG_SHAPE,
         )
-    elif name == "resnet50v2":
-        base = ResNet50V2(
+    elif name == "mobilenetv3":
+        base = MobileNetV3Large(
             weights="imagenet",
             include_top=False,
             input_shape=IMG_SHAPE,
@@ -48,10 +48,9 @@ def build_feature_extractor(name: str) -> tf.keras.Model:
     else:
         raise ValueError(f"Backbone '{name}' tidak dikenal.")
 
-    # TIDAK pakai pooling di base model, kita bikin sendiri:
     x = base.output
-    x = GlobalAveragePooling2D(name=f"{name}_gap")(x)          # -> 1280 dim (EffNet), dll
-    feat = Dense(256, activation="relu", name=f"{name}_fc256")(x)  # -> 256 dim
+    x = GlobalAveragePooling2D(name=f"{name}_gap")(x)
+    feat = Dense(256, activation="relu", name=f"{name}_fc256")(x)
 
     extractor = Model(
         inputs=base.input,
@@ -72,7 +71,7 @@ def get_feature_extractor(name: str) -> tf.keras.Model:
 BACKBONE_FOR_MODEL = {
     "best_detection": "resnet50",
     "resnet50_rf": "resnet50",
-    "resnet50v2_rf": "resnet50v2",
+    "mobilenetv3_rf": "mobilenetv3",   
     "efficientnet_rf": "efficientnet",
 }
 
