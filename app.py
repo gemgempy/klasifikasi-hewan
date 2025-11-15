@@ -41,9 +41,10 @@ st.write("---")
 MODEL_LABEL = {
     "best_detection": "Deteksi Hewan (ResNet-based)",
     "resnet50_rf": "Klasifikasi Hewan - ResNet50 + RF",
-    "resnet50v2_rf": "Klasifikasi Hewan - ResNet50V2 + RF",
+    "mobilenetv3_rf": "Klasifikasi Hewan - MobileNetV3Large + RF",  
     "efficientnet_rf": "Klasifikasi Hewan - EfficientNetB0 + RF",
 }
+
 
 available_model_keys = [k for k in MODEL_LABEL.keys() if k in MODEL_FILES]
 
