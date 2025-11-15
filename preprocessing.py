@@ -27,15 +27,18 @@ def load_image(file) -> Image.Image:
 def preprocess_image(file) -> Tuple[np.ndarray, Image.Image]:
     """Load gambar, resize, normalisasi.
 
+    Sama dengan ImageDataGenerator:
+      rescale=(1.0/127.5)-1.0 -> range piksel [-1, 1]
+
     Output:
-      - image_array: np.ndarray shape (1, H, W, 3), nilai float32 [0,1]
+      - image_array: np.ndarray shape (1, H, W, 3)
       - img_resized: PIL.Image untuk ditampilkan di Streamlit
     """
     img = load_image(file)
     img_resized = img.resize(IMG_SIZE)
 
-    # Normalisasi sederhana 0–1
-    arr = np.asarray(img_resized).astype("float32") / 255.0
+    arr = np.asarray(img_resized).astype("float32")
+    arr = (arr / 127.5) - 1.0    # rescale ke [-1, 1]
     arr = np.expand_dims(arr, axis=0)  # (1, H, W, 3)
 
     return arr, img_resized
