@@ -15,7 +15,7 @@ MODEL_DIR = BASE_DIR / "models"
 MODEL_FILES = {
     "best_detection": "best_detection_model_from_resnet.joblib",
     "resnet50_rf": "resnet50-rf.joblib",
-    "resnet50v2_rf": "resnet50v2-rf.joblib",
+    "mobilenetv3_rf": "mobilenetv3-rf.joblib",  
     "efficientnet_rf": "efficientnet-rf.joblib",
 }
 
