@@ -5,13 +5,13 @@ from typing import Dict, Tuple
 import numpy as np
 import joblib
 import tensorflow as tf
+
 from tensorflow.keras.applications import ResNet50, ResNet50V2, EfficientNetB0
 from tensorflow.keras.layers import GlobalAveragePooling2D, Dense
 from tensorflow.keras.models import Model
 
 from config import MODEL_DIR, MODEL_FILES, IMG_SHAPE, CLASS_NAMES
 from preprocessing import preprocess_image
-
 
 # ------------------------------
 # FEATURE EXTRACTOR (256 dim)
@@ -48,9 +48,10 @@ def build_feature_extractor(name: str) -> tf.keras.Model:
     else:
         raise ValueError(f"Backbone '{name}' tidak dikenal.")
 
+    # TIDAK pakai pooling di base model, kita bikin sendiri:
     x = base.output
-    x = GlobalAveragePooling2D(name=f"{name}_gap")(x)
-    feat = Dense(256, activation="relu", name=f"{name}_feat_dense")(x)
+    x = GlobalAveragePooling2D(name=f"{name}_gap")(x)          # -> 1280 dim (EffNet), dll
+    feat = Dense(256, activation="relu", name=f"{name}_fc256")(x)  # -> 256 dim
 
     extractor = Model(
         inputs=base.input,
@@ -112,6 +113,10 @@ def extract_features(image_array: np.ndarray, backbone_key: str) -> np.ndarray:
     """
     extractor = get_feature_extractor(backbone_key)
     feats = extractor.predict(image_array)
+
+    # DEBUG: kalau mau cek di log Streamlit Cloud
+    print(">>> FEATURE SHAPE:", feats.shape)
+
     feats = feats.reshape((feats.shape[0], -1))  # (1, 256)
     return feats
 
@@ -142,6 +147,9 @@ def predict_image(file, model_key: str) -> Tuple[str, int, np.ndarray, np.ndarra
 
     # 3) Load model RF + prediksi
     rf_model = get_rf_model(model_key)
+    print(">>> RF expects n_features_in_ =", getattr(rf_model, "n_features_in_", None))
+    print(">>> Features shape being passed to RF:", features.shape)
+
     y_pred_idx = int(rf_model.predict(features)[0])
 
     proba = None
