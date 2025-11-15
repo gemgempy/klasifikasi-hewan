@@ -1,59 +1,73 @@
 # models.py
-# Load backbone CNN (ResNet50, ResNet50V2, EfficientNetB0)
-# dan model RandomForest (.joblib), lalu sediakan fungsi prediksi.
+# Load backbone CNN + RandomForest (.joblib) dan sediakan fungsi prediksi.
 
 from typing import Dict, Tuple
 import numpy as np
 import joblib
 import tensorflow as tf
 from tensorflow.keras.applications import ResNet50, ResNet50V2, EfficientNetB0
+from tensorflow.keras.layers import GlobalAveragePooling2D, Dense
+from tensorflow.keras.models import Model
 
 from config import MODEL_DIR, MODEL_FILES, IMG_SHAPE, CLASS_NAMES
 from preprocessing import preprocess_image
 
 
 # ------------------------------
-# Load backbone CNN (pretrained)
+# FEATURE EXTRACTOR (256 dim)
 # ------------------------------
 
-_backbones: Dict[str, tf.keras.Model] = {}
-_rf_models: Dict[str, object] = {}  # sklearn RandomForest atau sejenisnya
+_feature_extractors: Dict[str, tf.keras.Model] = {}
+_rf_models: Dict[str, object] = {}
 
 
-def get_backbone(name: str) -> tf.keras.Model:
-    """Lazy-load backbone CNN agar tidak memakan memori di awal."""
-    if name in _backbones:
-        return _backbones[name]
-
+def build_feature_extractor(name: str) -> tf.keras.Model:
+    """
+    Membangun model feature extractor:
+      base_model -> GAP -> Dense(256, relu)
+    Output: vektor fitur panjang 256 (sesuai training RandomForest).
+    """
     if name == "resnet50":
-        model = ResNet50(
+        base = ResNet50(
             weights="imagenet",
             include_top=False,
             input_shape=IMG_SHAPE,
-            pooling="avg",
         )
     elif name == "resnet50v2":
-        model = ResNet50V2(
+        base = ResNet50V2(
             weights="imagenet",
             include_top=False,
             input_shape=IMG_SHAPE,
-            pooling="avg",
         )
     elif name == "efficientnet":
-        model = EfficientNetB0(
+        base = EfficientNetB0(
             weights="imagenet",
             include_top=False,
             input_shape=IMG_SHAPE,
-            pooling="avg",
         )
     else:
         raise ValueError(f"Backbone '{name}' tidak dikenal.")
 
-    _backbones[name] = model
-    return model
+    x = base.output
+    x = GlobalAveragePooling2D(name=f"{name}_gap")(x)
+    feat = Dense(256, activation="relu", name=f"{name}_feat_dense")(x)
+
+    extractor = Model(
+        inputs=base.input,
+        outputs=feat,
+        name=f"{name}_feature_extractor",
+    )
+    return extractor
 
 
-# Mapping: nama model RF -> backbone yang dipakai
+def get_feature_extractor(name: str) -> tf.keras.Model:
+    """Lazy-load feature extractor supaya tidak membangun berulang-ulang."""
+    if name not in _feature_extractors:
+        _feature_extractors[name] = build_feature_extractor(name)
+    return _feature_extractors[name]
+
+
+# Mapping: model RF -> backbone
 BACKBONE_FOR_MODEL = {
     "best_detection": "resnet50",
     "resnet50_rf": "resnet50",
@@ -63,11 +77,11 @@ BACKBONE_FOR_MODEL = {
 
 
 # ------------------------------
-# Load model RandomForest (.joblib)
+# LOAD MODEL RANDOMFOREST (.joblib)
 # ------------------------------
 
 def get_rf_model(key: str):
-    """Lazy-load RandomForest/ML model dari file .joblib."""
+    """Lazy-load RandomForest / model ML dari file .joblib di folder models/."""
     if key in _rf_models:
         return _rf_models[key]
 
@@ -77,7 +91,8 @@ def get_rf_model(key: str):
     path = MODEL_DIR / MODEL_FILES[key]
     if not path.exists():
         raise FileNotFoundError(
-            f"File model '{path}' tidak ditemukan. Pastikan file .joblib ada di folder 'models/'."
+            f"File model '{path}' tidak ditemukan. "
+            f"Pastikan file .joblib ada di folder 'models/'."
         )
 
     model = joblib.load(path)
@@ -86,28 +101,33 @@ def get_rf_model(key: str):
 
 
 # ------------------------------
-# Pipeline prediksi 1 gambar
+# PIPELINE PREDIKSI 1 GAMBAR
 # ------------------------------
 
 def extract_features(image_array: np.ndarray, backbone_key: str) -> np.ndarray:
-    """Gunakan backbone CNN untuk mengubah gambar -> fitur vektor."""
-    backbone = get_backbone(backbone_key)
-    feats = backbone.predict(image_array)
-    feats = feats.reshape((feats.shape[0], -1))
+    """
+    image_array: (1, H, W, 3) hasil preprocess_image
+    backbone_key: 'resnet50' / 'resnet50v2' / 'efficientnet'
+    Output: fitur shape (1, 256)
+    """
+    extractor = get_feature_extractor(backbone_key)
+    feats = extractor.predict(image_array)
+    feats = feats.reshape((feats.shape[0], -1))  # (1, 256)
     return feats
 
 
 def predict_image(file, model_key: str) -> Tuple[str, int, np.ndarray, np.ndarray]:
-    """Pipeline lengkap:
+    """
+    Pipeline lengkap:
     1. Preprocess gambar (resize, normalisasi)
-    2. Ekstrak fitur dengan backbone yang sesuai
-    3. Prediksi dengan model .joblib
+    2. Ekstrak fitur 256-dim dengan backbone sesuai
+    3. Prediksi dengan model RandomForest .joblib
 
     Return:
       - label_str: nama kelas (string)
       - label_idx: index kelas (int)
       - proba: probabilitas per kelas (np.ndarray) atau None
-      - img_np: array gambar (H, W, 3) untuk visualisasi tambahan
+      - img_np: array gambar (H, W, 3) untuk visualisasi
     """
     if model_key not in BACKBONE_FOR_MODEL:
         raise KeyError(f"Model key '{model_key}' tidak dikenali.")
@@ -116,11 +136,11 @@ def predict_image(file, model_key: str) -> Tuple[str, int, np.ndarray, np.ndarra
     img_array, img_pil = preprocess_image(file)
     img_np = np.asarray(img_pil)
 
-    # 2) Ekstrak fitur
+    # 2) Ekstrak fitur 256-dim
     backbone_key = BACKBONE_FOR_MODEL[model_key]
     features = extract_features(img_array, backbone_key)
 
-    # 3) Load model RF dan prediksi
+    # 3) Load model RF + prediksi
     rf_model = get_rf_model(model_key)
     y_pred_idx = int(rf_model.predict(features)[0])
 
