@@ -1,87 +1,82 @@
 # models.py
-# Load backbone CNN + RandomForest (.joblib) dan sediakan fungsi prediksi.
+# Load model CNN end-to-end (.keras/.h5/.joblib) dan RandomForest (.joblib)
+# + pipeline prediksi untuk 1 gambar.
+#
+# Model yang didukung (tanpa DenseNet):
+# - ResNet50 (end-to-end)
+# - MobileNetV3Large (end-to-end)
+# - EfficientNetB0 (end-to-end)
+# - MobileNetV3Large features + RandomForest (hybrid)
 
-from typing import Dict, Tuple
+from __future__ import annotations
+
+from typing import Dict, Tuple, Optional
 import numpy as np
 import joblib
 import tensorflow as tf
 
-from tensorflow.keras.applications import ResNet50, EfficientNetB0, MobileNetV3Large
-from tensorflow.keras.layers import GlobalAveragePooling2D, Dense
 from tensorflow.keras.models import Model
+from tensorflow.keras.layers import GlobalAveragePooling2D, InputLayer, Lambda
+
+from tensorflow.keras.applications.resnet import preprocess_input as resnet_preprocess
+from tensorflow.keras.applications.efficientnet import preprocess_input as effnet_preprocess
+from tensorflow.keras.applications.mobilenet_v3 import preprocess_input as mobilenetv3_preprocess
 
 from config import MODEL_DIR, MODEL_FILES, IMG_SHAPE, CLASS_NAMES
 from preprocessing import preprocess_image
 
-# ------------------------------
-# FEATURE EXTRACTOR (256 dim)
-# ------------------------------
 
-_feature_extractors: Dict[str, tf.keras.Model] = {}
+# ==============================
+# CACHES
+# ==============================
+_cnn_models: Dict[str, object] = {}
 _rf_models: Dict[str, object] = {}
+_feature_extractors: Dict[str, tf.keras.Model] = {}
 
 
-def build_feature_extractor(name: str) -> tf.keras.Model:
+# ==============================
+# UTILS: LOAD MODEL
+# ==============================
+def _load_keras_or_joblib(path):
     """
-    Membangun model feature extractor:
-      base_model -> GAP -> Dense(256, relu)
-    Output: vektor fitur panjang 256 (sesuai training RandomForest).
+    Coba load sebagai Keras model dulu (untuk .keras/.h5/folder saved_model),
+    kalau gagal baru fallback ke joblib (untuk .joblib).
     """
-    if name == "resnet50":
-        base = ResNet50(
-            weights="imagenet",
-            include_top=False,
-            input_shape=IMG_SHAPE,
-        )
-    elif name == "mobilenetv3":
-        base = MobileNetV3Large(
-            weights="imagenet",
-            include_top=False,
-            input_shape=IMG_SHAPE,
-        )
-    elif name == "efficientnet":
-        base = EfficientNetB0(
-            weights="imagenet",
-            include_top=False,
-            input_shape=IMG_SHAPE,
-        )
-    else:
-        raise ValueError(f"Backbone '{name}' tidak dikenal.")
+    # 1) keras load (aman untuk .keras, .h5, SavedModel dir)
+    try:
+        return tf.keras.models.load_model(str(path))
+    except Exception:
+        pass
 
-    x = base.output
-    x = GlobalAveragePooling2D(name=f"{name}_gap")(x)
-    feat = Dense(256, activation="relu", name=f"{name}_fc256")(x)
-
-    extractor = Model(
-        inputs=base.input,
-        outputs=feat,
-        name=f"{name}_feature_extractor",
-    )
-    return extractor
+    # 2) joblib load
+    return joblib.load(str(path))
 
 
-def get_feature_extractor(name: str) -> tf.keras.Model:
-    """Lazy-load feature extractor supaya tidak membangun berulang-ulang."""
-    if name not in _feature_extractors:
-        _feature_extractors[name] = build_feature_extractor(name)
-    return _feature_extractors[name]
+def get_cnn_model(key: str):
+    """
+    Lazy-load model CNN end-to-end dari MODEL_FILES.
+    key contoh: 'resnet50', 'mobilenetv3', 'efficientnetb0'
+    """
+    if key in _cnn_models:
+        return _cnn_models[key]
 
+    if key not in MODEL_FILES:
+        raise KeyError(f"Tidak ada entri MODEL_FILES untuk key='{key}'.")
 
-# Mapping: model RF -> backbone
-BACKBONE_FOR_MODEL = {
-    "best_detection": "resnet50",
-    "resnet50_rf": "resnet50",
-    "mobilenetv3_rf": "mobilenetv3",   
-    "efficientnet_rf": "efficientnet",
-}
+    path = MODEL_DIR / MODEL_FILES[key]
+    if not path.exists():
+        raise FileNotFoundError(f"File model tidak ditemukan: {path}")
 
+    model = _load_keras_or_joblib(path)
+    _cnn_models[key] = model
+    return model
 
-# ------------------------------
-# LOAD MODEL RANDOMFOREST (.joblib)
-# ------------------------------
 
 def get_rf_model(key: str):
-    """Lazy-load RandomForest / model ML dari file .joblib di folder models/."""
+    """
+    Lazy-load model RandomForest dari MODEL_FILES.
+    key contoh: 'mobilenetv3_rf'
+    """
     if key in _rf_models:
         return _rf_models[key]
 
@@ -90,79 +85,172 @@ def get_rf_model(key: str):
 
     path = MODEL_DIR / MODEL_FILES[key]
     if not path.exists():
-        raise FileNotFoundError(
-            f"File model '{path}' tidak ditemukan. "
-            f"Pastikan file .joblib ada di folder 'models/'."
-        )
+        raise FileNotFoundError(f"File RF tidak ditemukan: {path}")
 
-    model = joblib.load(path)
+    model = joblib.load(str(path))
     _rf_models[key] = model
     return model
 
 
-# ------------------------------
-# PIPELINE PREDIKSI 1 GAMBAR
-# ------------------------------
-
-def extract_features(image_array: np.ndarray, backbone_key: str) -> np.ndarray:
+# ==============================
+# PREPROCESS BACKBONE
+# ==============================
+def _ensure_0_255_float(x: np.ndarray) -> np.ndarray:
     """
-    image_array: (1, H, W, 3) hasil preprocess_image
-    backbone_key: 'resnet50' / 'resnet50v2' / 'efficientnet'
-    Output: fitur shape (1, 256)
+    Training kamu pakai preprocess_input pada float32 (range umumnya 0..255).
+    Kalau preprocess_image ternyata mengeluarkan 0..1, kita scale balik ke 0..255.
     """
-    extractor = get_feature_extractor(backbone_key)
-    feats = extractor.predict(image_array)
-
-    # DEBUG: kalau mau cek di log Streamlit Cloud
-    print(">>> FEATURE SHAPE:", feats.shape)
-
-    feats = feats.reshape((feats.shape[0], -1))  # (1, 256)
-    return feats
+    x = x.astype("float32")
+    mx = float(np.max(x)) if x.size else 0.0
+    if mx <= 1.5:  # indikasi kuat datanya 0..1
+        x = x * 255.0
+    return x
 
 
+def _preprocess_for_backbone(x: np.ndarray, backbone: str) -> np.ndarray:
+    """
+    x: (1,H,W,3) float32 RGB (0..255)
+    backbone: 'resnet50' | 'mobilenetv3' | 'efficientnetb0'
+    """
+    x = _ensure_0_255_float(x)
+
+    if backbone == "resnet50":
+        return resnet_preprocess(x.copy())
+    if backbone == "mobilenetv3":
+        return mobilenetv3_preprocess(x.copy())
+    if backbone == "efficientnetb0":
+        return effnet_preprocess(x.copy())
+
+    raise ValueError(f"Backbone '{backbone}' tidak dikenal.")
+
+
+# ==============================
+# FEATURE EXTRACTOR: MobileNetV3 backbone from trained model
+# ==============================
+def _find_backbone_mobilenet(full_model: Model) -> Optional[Model]:
+    """
+    Ambil backbone MobileNetV3Large dari model end-to-end yang sudah dilatih.
+    Ini lebih benar dibanding bikin backbone baru dari ImageNet, karena kamu sudah fine-tune.
+    """
+    # kandidat: layer yang merupakan sub-Model dan namanya mengandung mobilenet
+    for layer in full_model.layers:
+        if isinstance(layer, tf.keras.Model) and "mobilenet" in layer.name.lower():
+            return layer
+
+    # fallback: ambil sub-Model paling besar
+    candidates = [l for l in full_model.layers if isinstance(l, tf.keras.Model)]
+    if candidates:
+        return max(candidates, key=lambda m: len(m.layers))
+
+    return None
+
+
+def get_mobilenet_feature_extractor(mobilenet_e2e_key: str = "mobilenetv3") -> tf.keras.Model:
+    """
+    Feature extractor: preprocess_input -> backbone -> GlobalAveragePooling2D
+    Output shape biasanya (N, 960) untuk MobileNetV3Large.
+    """
+    cache_key = f"{mobilenet_e2e_key}_feature_extractor"
+    if cache_key in _feature_extractors:
+        return _feature_extractors[cache_key]
+
+    mobilenet_model = get_cnn_model(mobilenet_e2e_key)
+    if not isinstance(mobilenet_model, tf.keras.Model):
+        raise TypeError("Model MobileNet end-to-end yang diload bukan tf.keras.Model. Pastikan file benar.")
+
+    backbone = _find_backbone_mobilenet(mobilenet_model)
+    if backbone is None:
+        raise RuntimeError("Backbone MobileNetV3 tidak ditemukan dari model end-to-end. Cek struktur model yang disimpan.")
+
+    feat_model = tf.keras.Sequential(
+        [
+            InputLayer(input_shape=IMG_SHAPE),
+            Lambda(mobilenetv3_preprocess),
+            backbone,
+            GlobalAveragePooling2D(),
+        ],
+        name="mobilenetv3_feature_extractor",
+    )
+
+    _feature_extractors[cache_key] = feat_model
+    return feat_model
+
+
+# ==============================
+# PREDICTION HELPERS
+# ==============================
+def _probs_from_model_output(pred: np.ndarray) -> np.ndarray:
+    """
+    Beberapa model sudah output softmax, sebagian output logits.
+    Kalau tidak sum=1, kita softmax-kan.
+    """
+    pred = np.asarray(pred)
+    if pred.ndim != 2:
+        pred = np.reshape(pred, (pred.shape[0], -1))
+
+    row_sum = pred.sum(axis=1, keepdims=True)
+    if np.allclose(row_sum, 1.0, atol=1e-3):
+        return pred
+
+    return tf.nn.softmax(pred, axis=1).numpy()
+
+
+# ==============================
+# MAIN PIPELINE: predict_image
+# ==============================
 def predict_image(file, model_key: str) -> Tuple[str, int, np.ndarray, np.ndarray]:
     """
-    Pipeline lengkap:
-    1. Preprocess gambar (resize, normalisasi)
-    2. Ekstrak fitur 256-dim dengan backbone sesuai
-    3. Prediksi dengan model RandomForest .joblib
-
     Return:
-      - label_str: nama kelas (string)
-      - label_idx: index kelas (int)
-      - proba: probabilitas per kelas (np.ndarray) atau None
-      - img_np: array gambar (H, W, 3) untuk visualisasi
+      - label_str: nama kelas
+      - label_idx: index kelas
+      - proba: np.ndarray shape (num_classes,) atau None
+      - img_np: array gambar (H,W,3) untuk visualisasi Streamlit
     """
-    if model_key not in BACKBONE_FOR_MODEL:
-        raise KeyError(f"Model key '{model_key}' tidak dikenali.")
 
-    # 1) Preprocess gambar
-    img_array, img_pil = preprocess_image(file)
+    # 1) Baca & resize dari preprocessing.py
+    img_array, img_pil = preprocess_image(file)   # img_array biasanya (1,224,224,3)
     img_np = np.asarray(img_pil)
 
-    # 2) Ekstrak fitur 256-dim
-    backbone_key = BACKBONE_FOR_MODEL[model_key]
-    features = extract_features(img_array, backbone_key)
+    # ---- CASE A: END-TO-END CNN ----
+    # Harap MODEL_FILES punya key: 'resnet50', 'mobilenetv3', 'efficientnetb0'
+    if model_key in ("resnet50", "mobilenetv3", "efficientnetb0"):
+        model = get_cnn_model(model_key)
+        if not isinstance(model, tf.keras.Model):
+            raise TypeError(f"Model '{model_key}' bukan tf.keras.Model. Pastikan format file model benar.")
 
-    # 3) Load model RF + prediksi
-    rf_model = get_rf_model(model_key)
-    print(">>> RF expects n_features_in_ =", getattr(rf_model, "n_features_in_", None))
-    print(">>> Features shape being passed to RF:", features.shape)
+        x_pp = _preprocess_for_backbone(img_array, backbone=model_key)
+        pred = model.predict(x_pp, verbose=0)
+        probs = _probs_from_model_output(pred)[0]
 
-    y_pred_idx = int(rf_model.predict(features)[0])
+        y_pred_idx = int(np.argmax(probs))
+        label_str = CLASS_NAMES[y_pred_idx] if 0 <= y_pred_idx < len(CLASS_NAMES) else f"Class {y_pred_idx}"
+        return label_str, y_pred_idx, probs, img_np
 
-    proba = None
-    if hasattr(rf_model, "predict_proba"):
-        proba = rf_model.predict_proba(features)[0]
+    # ---- CASE B: HYBRID MobileNetV3 features + RF ----
+    # Harap MODEL_FILES punya key RF: 'mobilenetv3_rf'
+    if model_key == "mobilenetv3_rf":
+        rf_model = get_rf_model(model_key)
 
-    # 4) Mapping index -> label string
-    if model_key == "best_detection":
-        # asumsi 0 = blank / tidak ada hewan, 1 = ada hewan
-        label_str = "Ada hewan" if y_pred_idx == 1 else "Tidak ada hewan"
-    else:
-        if 0 <= y_pred_idx < len(CLASS_NAMES):
-            label_str = CLASS_NAMES[y_pred_idx]
-        else:
-            label_str = f"Class {y_pred_idx}"
+        feat_extractor = get_mobilenet_feature_extractor(mobilenet_e2e_key="mobilenetv3")
+        feats = feat_extractor(img_array, training=False).numpy()  # (1, C)
 
-    return label_str, y_pred_idx, proba, img_np
+        # prediksi RF
+        y_pred_idx = int(rf_model.predict(feats)[0])
+
+        # probabilitas RF (kalau ada)
+        proba = None
+        if hasattr(rf_model, "predict_proba"):
+            proba_rf = rf_model.predict_proba(feats)[0]
+            # map sesuai rf_model.classes_
+            proba = np.zeros((len(CLASS_NAMES),), dtype="float32")
+            for cls_idx, p in zip(rf_model.classes_, proba_rf):
+                if 0 <= int(cls_idx) < len(CLASS_NAMES):
+                    proba[int(cls_idx)] = float(p)
+
+        label_str = CLASS_NAMES[y_pred_idx] if 0 <= y_pred_idx < len(CLASS_NAMES) else f"Class {y_pred_idx}"
+        return label_str, y_pred_idx, proba, img_np
+
+    raise KeyError(
+        f"model_key '{model_key}' tidak dikenali. "
+        f"Gunakan: resnet50 | mobilenetv3 | efficientnetb0 | mobilenetv3_rf"
+    )
