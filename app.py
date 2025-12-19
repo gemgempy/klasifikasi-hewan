@@ -1,50 +1,40 @@
 # app.py
-# Aplikasi Streamlit untuk mencoba model klasifikasi hewan
+# Aplikasi Streamlit untuk mencoba model klasifikasi hewan (model terbaru)
 
 import streamlit as st
+import pandas as pd
 
 from config import CLASS_NAMES, MODEL_FILES
 from models import predict_image
-
 
 st.set_page_config(
     page_title="Klasifikasi Hewan Kamera Trap",
     layout="centered",
 )
 
-
 st.title("📷 Klasifikasi Hewan dari Kamera Trap")
 
 st.markdown(
     """
-Upload satu gambar dari kamera trap (misalnya yang sangat terang,
-buram, kosong, atau ada hewan). Aplikasi ini akan melakukan
-**preprocessing** (resize 224×224, normalisasi) dan:
-
-- Untuk model **deteksi** → prediksi *ada hewan / tidak ada hewan*.
-- Untuk model **klasifikasi** → prediksi jenis hewan.
+Upload satu gambar dari kamera trap (misalnya terang, buram, kosong, atau ada hewan).
+Aplikasi akan melakukan resize 224×224, lalu menjalankan model yang kamu pilih.
 """
 )
 
-st.markdown("**File .joblib yang diharapkan ada di folder `models/`:**")
-st.code(
-    "\n".join(f"- {name}" for name in MODEL_FILES.values()),
-    language="markdown",
-)
+st.markdown("**File model yang diharapkan ada di folder `models/`:**")
+st.code("\n".join(f"- {name}" for name in MODEL_FILES.values()), language="markdown")
 
 st.write("---")
 
 # ------------------------------
 # Pilih model
 # ------------------------------
-
 MODEL_LABEL = {
-    "best_detection": "Deteksi Hewan (ResNet-based)",
-    "resnet50_rf": "Klasifikasi Hewan - ResNet50 + RF",
-    "mobilenetv3_rf": "Klasifikasi Hewan - MobileNetV3Large + RF",  
-    "efficientnet_rf": "Klasifikasi Hewan - EfficientNetB0 + RF",
+    "mobilenetv3": "MobileNetV3Large (end-to-end)",
+    "resnet50": "ResNet50 (end-to-end)",
+    "efficientnetb0": "EfficientNetB0 (end-to-end)",
+    "mobilenetv3_rf": "MobileNetV3Large + RandomForest (hybrid)",
 }
-
 
 available_model_keys = [k for k in MODEL_LABEL.keys() if k in MODEL_FILES]
 
@@ -59,42 +49,40 @@ st.write("---")
 # ------------------------------
 # Upload gambar
 # ------------------------------
-
 uploaded = st.file_uploader(
     "Upload gambar (.jpg / .jpeg / .png)",
     type=["jpg", "jpeg", "png"],
 )
 
-if uploaded is not None:
-    st.image(uploaded, caption="Gambar input", use_column_width=True)
-
-    if st.button("🔍 Prediksi"):
-        with st.spinner("Memproses gambar dan menjalankan model..."):
-            label_str, label_idx, proba, img_np = predict_image(uploaded, model_key)
-
-        st.success("Prediksi selesai!")
-
-        st.subheader("Hasil Prediksi")
-        st.markdown(f"**Label:** {label_str}")
-        st.markdown(f"**Index kelas:** `{label_idx}`")
-
-        if proba is not None:
-            st.write("Probabilitas per kelas:")
-
-            if model_key == "best_detection":
-                rows = [
-                    {"Kelas": "Tidak ada hewan (0)", "Probabilitas": float(proba[0])},
-                    {"Kelas": "Ada hewan (1)", "Probabilitas": float(proba[1])},
-                ]
-                st.table(rows)
-            else:
-                rows = []
-                for i, p in enumerate(proba):
-                    if i < len(CLASS_NAMES):
-                        name = CLASS_NAMES[i]
-                    else:
-                        name = f"Class {i}"
-                    rows.append({"Kelas": name, "Probabilitas": float(p)})
-                st.table(rows)
-else:
+if uploaded is None:
     st.info("Silakan upload gambar terlebih dahulu.")
+    st.stop()
+
+st.image(uploaded, caption="Gambar input", use_column_width=True)
+
+if st.button("🔍 Prediksi"):
+    with st.spinner("Memproses gambar dan menjalankan model..."):
+        label_str, label_idx, proba, _img_np = predict_image(uploaded, model_key)
+
+    st.success("Prediksi selesai!")
+
+    st.subheader("Hasil Prediksi")
+    st.markdown(f"**Label:** {label_str}")
+    st.markdown(f"**Index kelas:** `{label_idx}`")
+
+    if proba is None:
+        st.info("Model ini tidak menyediakan probabilitas per kelas.")
+        st.stop()
+
+    # Tabel probabilitas
+    rows = []
+    for i, p in enumerate(proba):
+        name = CLASS_NAMES[i] if i < len(CLASS_NAMES) else f"Class {i}"
+        rows.append({"Kelas": name, "Probabilitas": float(p)})
+
+    df = pd.DataFrame(rows).sort_values("Probabilitas", ascending=False)
+
+    st.subheader("Probabilitas per Kelas")
+    st.dataframe(df, use_container_width=True)
+
+    st.bar_chart(df.set_index("Kelas")["Probabilitas"])
